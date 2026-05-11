@@ -23,11 +23,24 @@ public class EnemyAI : MonoBehaviour
     public Transform groundCheck;
     public float groundCheckRadius = 0.2f;
 
+    [Header("Combat")]
+    public int damage = 10;
+    public float damageCooldown = 1f;
+    private float lastDamageTime = -99f;
+
+    // ── BARU: Slam / stomp saat landing ──────────────────────
+    [Header("Slam / Stomp")]
+    public float slamRadius = 2f;       // radius knockback saat landing
+    public int slamDamage = 15;         // damage slam
+    public float slamKnockbackForce = 8f; // override knockback force saat slam
+    // ──────────────────────────────────────────────────────────
+
     private Rigidbody2D rb;
     private Transform player;
     private Vector2 startPosition;
     private bool isFacingRight = true;
     private bool isGrounded;
+    private bool wasInAir = false;      // tracking apakah sebelumnya di udara
 
     private float flipCooldown = 0f;
     private const float FLIP_COOLDOWN_TIME = 0.4f;
@@ -35,24 +48,19 @@ public class EnemyAI : MonoBehaviour
     private float jumpCooldown = 0f;
     private const float JUMP_COOLDOWN_TIME = 1.2f;
 
-    // Batas patroli kiri & kanan dalam world space — dihitung di Awake
     private float patrolLeft;
     private float patrolRight;
 
     private enum State { Patrolling, Chasing, Returning }
     private State currentState = State.Patrolling;
 
-    // ─────────────────────────────────────────
     void Awake()
     {
         rb = GetComponent<Rigidbody2D>();
         rb.freezeRotation = true;
         rb.gravityScale = 3f;
 
-        // Simpan posisi awal di Awake supaya pasti benar sebelum Start lain jalan
         startPosition = transform.position;
-
-        // Hitung batas patroli langsung di sini — tidak bergantung inspector lagi
         patrolLeft  = startPosition.x - patrolDistance;
         patrolRight = startPosition.x + patrolDistance;
     }
@@ -62,7 +70,6 @@ public class EnemyAI : MonoBehaviour
         GameObject p = GameObject.FindGameObjectWithTag("Player");
         if (p != null) player = p.transform;
 
-        // Auto cari / buat GroundCheck
         if (groundCheck == null)
         {
             Transform existing = transform.Find("GroundCheck");
@@ -78,15 +85,21 @@ public class EnemyAI : MonoBehaviour
         }
     }
 
-    // ─────────────────────────────────────────
     void Update()
     {
         if (flipCooldown > 0f) flipCooldown -= Time.deltaTime;
         if (jumpCooldown > 0f) jumpCooldown -= Time.deltaTime;
 
+        bool wasGrounded = isGrounded;
         CheckGrounded();
 
-        // Kalau player belum ditemukan, coba cari lagi
+        // ── Deteksi landing: sebelumnya di udara, sekarang di tanah ──
+        if (!wasGrounded && isGrounded)
+            OnLand();
+
+        wasInAir = !isGrounded;
+        // ──────────────────────────────────────────────────────────────
+
         if (player == null)
         {
             GameObject p = GameObject.FindGameObjectWithTag("Player");
@@ -119,27 +132,42 @@ public class EnemyAI : MonoBehaviour
                     rb.velocity = new Vector2(0f, rb.velocity.y);
                     currentState = State.Patrolling;
                 }
-                // Kalau player datang lagi saat balik
                 if (distToPlayer <= detectionRadius)
                     currentState = State.Chasing;
                 break;
         }
     }
 
-    // ─────────────────────────────────────────
-    // PATROL — pakai world position batas kiri/kanan
-    // ─────────────────────────────────────────
+    // ── Dipanggil tepat saat enemy mendarat ───────────────────
+    void OnLand()
+    {
+        if (player == null) return;
+
+        float distToPlayer = Vector2.Distance(transform.position, player.position);
+        if (distToPlayer <= slamRadius)
+        {
+            PlayerController pc = player.GetComponent<PlayerController>();
+            if (pc != null)
+            {
+                // Simpan & override knockback force sementara
+                float originalForce = pc.knockbackForce;
+                pc.knockbackForce = slamKnockbackForce;
+                pc.TakeDamage(slamDamage, transform.position);
+                pc.knockbackForce = originalForce;
+            }
+        }
+    }
+    // ──────────────────────────────────────────────────────────
+
     void DoPatrol()
     {
         float posX = transform.position.x;
 
-        // Balik arah kalau sudah sampai batas
         if (posX >= patrolRight && isFacingRight)
             TryFlip();
         else if (posX <= patrolLeft && !isFacingRight)
             TryFlip();
 
-        // Balik kalau ada dinding atau tepi (dengan cooldown)
         if (flipCooldown <= 0f)
         {
             if (IsWallAhead() || IsEdgeAhead())
@@ -150,9 +178,6 @@ public class EnemyAI : MonoBehaviour
         rb.velocity = new Vector2(dir * patrolSpeed, rb.velocity.y);
     }
 
-    // ─────────────────────────────────────────
-    // CHASE
-    // ─────────────────────────────────────────
     void DoChase()
     {
         float dirX = player.position.x - transform.position.x;
@@ -171,9 +196,6 @@ public class EnemyAI : MonoBehaviour
         }
     }
 
-    // ─────────────────────────────────────────
-    // RETURN TO START
-    // ─────────────────────────────────────────
     void DoReturn()
     {
         float dirX = startPosition.x - transform.position.x;
@@ -187,9 +209,18 @@ public class EnemyAI : MonoBehaviour
             Jump();
     }
 
-    // ─────────────────────────────────────────
-    // HELPERS
-    // ─────────────────────────────────────────
+    // ── Damage biasa saat body-contact ────────────────────────
+    void OnCollisionStay2D(Collision2D col)
+    {
+        if (!col.gameObject.CompareTag("Player")) return;
+        if (Time.time - lastDamageTime < damageCooldown) return;
+
+        lastDamageTime = Time.time;
+        col.gameObject.GetComponent<PlayerController>()
+            ?.TakeDamage(damage, transform.position);
+    }
+    // ──────────────────────────────────────────────────────────
+
     void CheckGrounded()
     {
         if (groundCheck == null) return;
@@ -233,24 +264,22 @@ public class EnemyAI : MonoBehaviour
         jumpCooldown = JUMP_COOLDOWN_TIME;
     }
 
-    // ─────────────────────────────────────────
-    // GIZMOS
-    // ─────────────────────────────────────────
     void OnDrawGizmosSelected()
     {
         Vector3 origin = Application.isPlaying ? (Vector3)startPosition : transform.position;
 
-        // Detection & lose radius
         Gizmos.color = Color.yellow;
         Gizmos.DrawWireSphere(transform.position, detectionRadius);
         Gizmos.color = Color.red;
         Gizmos.DrawWireSphere(transform.position, loseRadius);
-
-        // Patrol range
         Gizmos.color = Color.green;
         Gizmos.DrawLine(origin + Vector3.left * patrolDistance, origin + Vector3.right * patrolDistance);
 
-        // Ground check
+        // ── Gizmo slam radius ──
+        Gizmos.color = Color.magenta;
+        Gizmos.DrawWireSphere(transform.position, slamRadius);
+        // ──────────────────────
+
         if (groundCheck != null)
         {
             Gizmos.color = Color.cyan;
